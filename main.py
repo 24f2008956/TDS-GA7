@@ -1123,3 +1123,258 @@ async def sanitize_output(request: Request):
         "safe": True,
         "reason": "SAFE",
     }
+
+from fastapi import FastAPI, Body
+from pydantic import BaseModel
+from typing import Any, Optional
+from datetime import datetime, timezone
+
+# app = FastAPI()
+
+
+# ---------- Models ----------
+
+class Claim(BaseModel):
+    subject: Optional[str] = None
+    predicate: Optional[str] = None
+    value: Any = None
+
+
+class Source(BaseModel):
+    id: Any = None
+    type: Any = None
+    origin: Any = None
+    observedAt: Any = None
+    value: Any = None
+    authoritative: Any = False
+
+
+class CorroborateRequest(BaseModel):
+    claim: Any = None
+    asOf: Any = None
+    stalenessDays: Any = None
+    sources: Any = None
+
+
+# ---------- Helpers ----------
+
+VALID_TYPES = {"dns", "ct_log", "registry", "archive", "scan"}
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+
+    try:
+        # Support timestamps ending in Z
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+    except Exception:
+        return None
+
+
+def is_fresh(observed_at, as_of, staleness_days):
+    observed = parse_timestamp(observed_at)
+
+    if observed is None:
+        return False
+
+    # Convert naive timestamps to UTC if necessary
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+
+    age_seconds = (as_of - observed).total_seconds()
+
+    # Future observations are not stale
+    if age_seconds < 0:
+        return True
+
+    return age_seconds <= staleness_days * 86400
+
+
+# ---------- Q5 ----------
+
+@app.post("/corroborate")
+def corroborate(body: Any = Body(...)):
+
+    # Rule 1: invalid
+    if not isinstance(body, dict):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    claim = body.get("claim")
+
+    if not isinstance(claim, dict):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    claim_value = claim.get("value")
+
+    if not isinstance(claim_value, str):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    as_of_raw = body.get("asOf")
+
+    if not isinstance(as_of_raw, str):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    as_of = parse_timestamp(as_of_raw)
+
+    if as_of is None:
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    staleness_days = body.get("stalenessDays")
+
+    # bool is technically a subclass of int in Python,
+    # so explicitly reject it.
+    if (
+        not isinstance(staleness_days, (int, float))
+        or isinstance(staleness_days, bool)
+    ):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    sources = body.get("sources")
+
+    if not isinstance(sources, list):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    # ---------- Validate / filter sources ----------
+    valid_sources = []
+
+    for source in sources:
+
+        if not isinstance(source, dict):
+            continue
+
+        source_id = source.get("id")
+        source_type = source.get("type")
+        origin = source.get("origin")
+        observed_at = source.get("observedAt")
+        value = source.get("value")
+
+        if not isinstance(source_id, str):
+            continue
+
+        if not isinstance(origin, str):
+            continue
+
+        if not isinstance(value, str):
+            continue
+
+        if not isinstance(observed_at, str):
+            continue
+
+        if source_type not in VALID_TYPES:
+            continue
+
+        valid_sources.append(source)
+
+    # ---------- Rule 2: authoritative contradiction ----------
+    contradicting = []
+
+    for source in valid_sources:
+
+        if not is_fresh(
+            source["observedAt"],
+            as_of,
+            staleness_days
+        ):
+            continue
+
+        if source.get("authoritative") is True:
+            if source["value"] != claim_value:
+                contradicting.append(source["id"])
+
+    if contradicting:
+        return {
+            "verdict": "contradicted",
+            "confidence": "low",
+            "corroboratingSources": sorted(contradicting)
+        }
+
+    # ---------- Rule 3: supporting evidence ----------
+    matching_fresh = []
+
+    for source in valid_sources:
+
+        if not is_fresh(
+            source["observedAt"],
+            as_of,
+            staleness_days
+        ):
+            continue
+
+        if source["value"] == claim_value:
+            matching_fresh.append(source)
+
+    # One representative per origin.
+    # Representative = lexicographically smallest id.
+    representatives = {}
+
+    for source in matching_fresh:
+        origin = source["origin"]
+
+        if (
+            origin not in representatives
+            or source["id"] < representatives[origin]["id"]
+        ):
+            representatives[origin] = source
+
+    reps = list(representatives.values())
+
+    if len(reps) >= 2:
+
+        distinct_types = {
+            source["type"]
+            for source in reps
+        }
+
+        if len(distinct_types) >= 2:
+            confidence = "high"
+        else:
+            confidence = "medium"
+
+        ids = sorted(source["id"] for source in reps)
+
+        return {
+            "verdict": "supported",
+            "confidence": confidence,
+            "corroboratingSources": ids
+        }
+
+    # ---------- Rule 4 ----------
+    return {
+        "verdict": "unverified",
+        "confidence": "low",
+        "corroboratingSources": []
+    }
