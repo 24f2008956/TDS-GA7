@@ -689,63 +689,63 @@ def contains_dangerous_scheme(text: str) -> bool:
     )
 
 
-def extract_urls(channel: str, output: str):
-    """
-    Extract URLs exactly according to the question.
-    """
+# def extract_urls(channel: str, output: str):
+#     """
+#     Extract URLs exactly according to the question.
+#     """
 
-    if channel == "html":
-        # Quoted src/href only
-        pattern = (
-            r"""\b(?:src|href)\s*=\s*"""
-            r"""(?:"([^"]*)"|'([^']*)')"""
-        )
+#     if channel == "html":
+#         # Quoted src/href only
+#         pattern = (
+#             r"""\b(?:src|href)\s*=\s*"""
+#             r"""(?:"([^"]*)"|'([^']*)')"""
+#         )
 
-        result = []
+#         result = []
 
-        for match in re.finditer(
-            pattern,
-            output,
-            flags=re.IGNORECASE,
-        ):
-            value = (
-                match.group(1)
-                if match.group(1) is not None
-                else match.group(2)
-            )
-            result.append(value)
+#         for match in re.finditer(
+#             pattern,
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             value = (
+#                 match.group(1)
+#                 if match.group(1) is not None
+#                 else match.group(2)
+#             )
+#             result.append(value)
 
-        return result
+#         return result
 
-    if channel == "markdown":
-        # Target inside ](...)
-        result = []
+#     if channel == "markdown":
+#         # Target inside ](...)
+#         result = []
 
-        for match in re.finditer(
-            r"\]\(([^)]*)\)",
-            output,
-        ):
-            value = match.group(1).strip()
+#         for match in re.finditer(
+#             r"\]\(([^)]*)\)",
+#             output,
+#         ):
+#             value = match.group(1).strip()
 
-            # Markdown permits angle brackets around a destination.
-            if len(value) >= 2 and value[0] == "<" and value[-1] == ">":
-                value = value[1:-1].strip()
+#             # Markdown permits angle brackets around a destination.
+#             if len(value) >= 2 and value[0] == "<" and value[-1] == ">":
+#                 value = value[1:-1].strip()
 
-            # If a markdown title follows the destination, keep only
-            # the destination itself.
-            if value:
-                if value.startswith(("http://", "https://", "//")):
-                    parts = value.split(None, 1)
-                    value = parts[0]
+#             # If a markdown title follows the destination, keep only
+#             # the destination itself.
+#             if value:
+#                 if value.startswith(("http://", "https://", "//")):
+#                     parts = value.split(None, 1)
+#                     value = parts[0]
 
-            result.append(value)
+#             result.append(value)
 
-        return result
+#         return result
 
-    if channel == "url":
-        return [output.strip()]
+#     if channel == "url":
+#         return [output.strip()]
 
-    return []
+#     return []
 
 
 def parse_url(value: str):
@@ -924,6 +924,178 @@ def url_is_external_exfil(url: str) -> bool:
 
 #     return None
 
+# def channel_violation(channel: str, output: str):
+
+#     # ========================================================
+#     # HTML
+#     # ========================================================
+#     if channel == "html":
+
+#         # 1. SCRIPT_TAG
+#         if re.search(
+#             r"<\s*(script|iframe|object|embed)\b",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "SCRIPT_TAG"
+
+#         # 2. EVENT_HANDLER
+#         # HTML event-handler attributes such as:
+#         # onclick=, onerror=, onload=, onmouseover=, etc.
+#         if re.search(
+#             r"\bon[a-z][a-z0-9_-]*\s*=",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "EVENT_HANDLER"
+
+#         # 3. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("html", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 4. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # MARKDOWN
+#     # ========================================================
+#     if channel == "markdown":
+
+#         # 1. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("markdown", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 2. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # URL
+#     # ========================================================
+#     if channel == "url":
+
+#         # 1. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("url", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 2. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # SQL
+#     # ========================================================
+#     if channel == "sql":
+
+#         if re.search(
+#             r"""['";]|--|/\*|\bunion\b|\bor\s+1\s*=\s*1\b""",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "SQL_METACHAR"
+
+#         return None
+
+#     # ========================================================
+#     # SHELL
+#     # ========================================================
+#     if channel == "shell":
+
+#         if re.search(
+#             r"""[;&|`<>]|\$\(|\$\{""",
+#             output,
+#         ):
+#             return "SHELL_METACHAR"
+
+#         return None
+
+#     return None
+def extract_urls(channel: str, output: str):
+    """
+    Extract URLs exactly according to the question.
+    """
+
+    if channel == "html":
+        # Quoted src/href only
+        pattern = (
+            r"""\b(?:src|href)\s*=\s*"""
+            r"""(?:"([^"]*)"|'([^']*)')"""
+        )
+
+        result = []
+
+        for match in re.finditer(
+            pattern,
+            output,
+            flags=re.IGNORECASE,
+        ):
+            value = (
+                match.group(1)
+                if match.group(1) is not None
+                else match.group(2)
+            )
+            result.append(value)
+
+        return result
+
+    if channel == "markdown":
+        # Target inside ](...)
+        result = []
+
+        for match in re.finditer(r"\]\(([^)]*)\)", output):
+            value = match.group(1).strip()
+            
+            # Properly handle CommonMark destination parsing
+            if value.startswith("<"):
+                # If enclosed in < >, the destination is everything up to the >
+                end_idx = value.find(">")
+                if end_idx != -1:
+                    url = value[1:end_idx]
+                else:
+                    url = value[1:] # Fallback for malformed
+            else:
+                # If not in < >, it cannot contain unescaped spaces.
+                # Split by whitespace to safely remove any trailing title.
+                parts = value.split(None, 1)
+                url = parts[0]
+                
+            result.append(url.strip())
+
+        return result
+
+    if channel == "url":
+        return [output.strip()]
+
+    return []
+
 def channel_violation(channel: str, output: str):
 
     # ========================================================
@@ -940,10 +1112,9 @@ def channel_violation(channel: str, output: str):
             return "SCRIPT_TAG"
 
         # 2. EVENT_HANDLER
-        # HTML event-handler attributes such as:
-        # onclick=, onerror=, onload=, onmouseover=, etc.
+        # Standard HTML events are on + letters (e.g., onclick, onload)
         if re.search(
-            r"\bon[a-z][a-z0-9_-]*\s*=",
+            r"\bon[a-z]+\s*=",
             output,
             flags=re.IGNORECASE,
         ):
@@ -1015,8 +1186,10 @@ def channel_violation(channel: str, output: str):
     # ========================================================
     if channel == "sql":
 
+        # FIXED: The prompt lists "the word union", "or", and "1=1" as separate items.
+        # We must flag the standalone word "or" and the standalone string "1=1".
         if re.search(
-            r"""['";]|--|/\*|\bunion\b|\bor\s+1\s*=\s*1\b""",
+            r"""['";]|--|/\*|\bunion\b|\bor\b|1=1""",
             output,
             flags=re.IGNORECASE,
         ):
