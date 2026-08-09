@@ -371,3 +371,227 @@ def action_firewall(req: ActionFirewallRequest):
     # ---------------------------------------------------------
 
     return firewall_result("allow", "ALLOW")
+
+class TerraformPlanRequest(BaseModel):
+    environment: str
+    state: Dict[str, Any]
+    providerVersion: str
+    destroyApproved: bool
+    resource: Dict[str, Any]
+
+
+REQUIRED_LABELS = {
+    "owner": "student-mitnf",
+    "environment": "production",
+    "cost_center": "cc-5zx9",
+}
+
+ALLOWED_BACKENDS = {"gcs", "s3", "azurerm", "remote"}
+STATEFUL_DELETE_TYPES = {
+    "storage_bucket",
+    "sql_database",
+    "persistent_disk",
+}
+
+
+@app.post("/terraform/plan")
+def terraform_plan(req: TerraformPlanRequest):
+
+    # ---------------------------------------------------------
+    # 1. Validate request and nested object types
+    # ---------------------------------------------------------
+
+    if not isinstance(req.environment, str):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(req.state, dict):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(req.providerVersion, str):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(req.destroyApproved, bool):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(req.resource, dict):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    # Required state types
+    if (
+        not isinstance(req.state.get("backend"), str)
+        or not isinstance(req.state.get("locked"), bool)
+    ):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    resource = req.resource
+
+    # Required resource fields/types
+    if not isinstance(resource.get("address"), str):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(resource.get("type"), str):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(resource.get("action"), str):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(resource.get("labels"), dict):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if resource.get("secret") is not None and not isinstance(
+        resource.get("secret"), str
+    ):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    if not isinstance(resource.get("forceDestroy"), bool):
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    # Validate allowed action values
+    if resource.get("action") not in {"create", "update", "delete"}:
+        return {
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+
+    # ---------------------------------------------------------
+    # 2. Environment
+    # ---------------------------------------------------------
+
+    if req.environment != "prod-csr1mn":
+        return {
+            "decision": "reject",
+            "reason": "ENVIRONMENT_MISMATCH"
+        }
+
+    # ---------------------------------------------------------
+    # 3. Remote state + locking
+    # ---------------------------------------------------------
+
+    if (
+        req.state.get("backend") not in ALLOWED_BACKENDS
+        or req.state.get("locked") is not True
+    ):
+        return {
+            "decision": "reject",
+            "reason": "STATE_UNSAFE"
+        }
+
+    # ---------------------------------------------------------
+    # 4. Provider version pinning
+    # ---------------------------------------------------------
+
+    provider = req.providerVersion.strip()
+
+    allowed_provider_versions = {
+        "6.2.1",
+        "= 6.2.1",
+        "~> 6.0",
+    }
+
+    if provider not in allowed_provider_versions:
+        return {
+            "decision": "reject",
+            "reason": "UNPINNED_PROVIDER"
+        }
+
+    # ---------------------------------------------------------
+    # 5. Required labels
+    # ---------------------------------------------------------
+
+    labels = resource.get("labels")
+
+    for key, expected_value in REQUIRED_LABELS.items():
+        if labels.get(key) != expected_value:
+            return {
+                "decision": "reject",
+                "reason": "MISSING_LABELS"
+            }
+
+    # ---------------------------------------------------------
+    # 6. Secret handling
+    # ---------------------------------------------------------
+
+    secret = resource.get("secret")
+
+    if secret is not None:
+        if (
+            not isinstance(secret, str)
+            or not secret.startswith("secret://")
+            or len(secret) <= len("secret://")
+        ):
+            return {
+                "decision": "reject",
+                "reason": "PLAINTEXT_SECRET"
+            }
+
+    # ---------------------------------------------------------
+    # 7. Destructive deletes
+    # ---------------------------------------------------------
+
+    if (
+        resource.get("action") == "delete"
+        and resource.get("type") in STATEFUL_DELETE_TYPES
+        and req.destroyApproved is not True
+    ):
+        return {
+            "decision": "reject",
+            "reason": "DELETE_NOT_APPROVED"
+        }
+
+    # ---------------------------------------------------------
+    # 8. Production storage bucket forceDestroy
+    # ---------------------------------------------------------
+
+    if (
+        resource.get("type") == "storage_bucket"
+        and resource.get("forceDestroy") is True
+    ):
+        return {
+            "decision": "reject",
+            "reason": "FORCE_DESTROY"
+        }
+
+    # ---------------------------------------------------------
+    # 9. Everything passed
+    # ---------------------------------------------------------
+
+    return {
+        "decision": "approve",
+        "reason": "APPROVE"
+    }
