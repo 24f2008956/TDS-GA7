@@ -3,6 +3,11 @@ from pydantic import BaseModel
 from typing import Any, Dict, List
 import re
 
+import re
+import html
+from urllib.parse import unquote, urlsplit
+from fastapi import Request
+
 app = FastAPI()
 
 
@@ -594,4 +599,379 @@ def terraform_plan(req: TerraformPlanRequest):
     return {
         "decision": "approve",
         "reason": "APPROVE"
+    }
+
+
+# ============================================================
+# Q4 - LLM Output Handling Gate (OWASP LLM05)
+# ============================================================
+
+ALLOWED_EXTERNAL_HOSTS = {
+    "cdn-wko562a.example",
+    "app-koyam7o.example",
+}
+
+VALID_CHANNELS = {"html", "markdown", "url", "sql", "shell"}
+
+
+def decode_once(value: str) -> str:
+    """
+    Decode exactly once in this order:
+    1. percent escapes
+    2. specified HTML entities
+    3. \\uXXXX escapes
+    """
+
+    # 1. Percent escapes
+    decoded = unquote(value)
+
+    # 2. HTML numeric entities and the five specified named entities
+    def html_entity_replace(match):
+        entity = match.group(0)
+
+        if entity.startswith("&#x") or entity.startswith("&#X"):
+            try:
+                return chr(int(entity[3:-1], 16))
+            except ValueError:
+                return entity
+
+        if entity.startswith("&#"):
+            try:
+                return chr(int(entity[2:-1], 10))
+            except ValueError:
+                return entity
+
+        named = {
+            "&lt;": "<",
+            "&gt;": ">",
+            "&quot;": '"',
+            "&apos;": "'",
+            "&amp;": "&",
+        }
+
+        return named.get(entity, entity)
+
+    decoded = re.sub(
+        r"&#x[0-9a-fA-F]+;|&#[0-9]+;|&lt;|&gt;|&quot;|&apos;|&amp;",
+        html_entity_replace,
+        decoded,
+        flags=re.IGNORECASE,
+    )
+
+    # 3. Literal \uXXXX escapes
+    def unicode_replace(match):
+        try:
+            return chr(int(match.group(1), 16))
+        except ValueError:
+            return match.group(0)
+
+    decoded = re.sub(
+        r"\\u([0-9a-fA-F]{4})",
+        unicode_replace,
+        decoded,
+    )
+
+    return decoded
+
+
+def contains_dangerous_scheme(text: str) -> bool:
+    """
+    Detect dangerous schemes appearing directly in text.
+    """
+    return bool(
+        re.search(
+            r"(?:javascript|data|vbscript)\s*:",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def extract_urls(channel: str, output: str):
+    """
+    Extract URLs according to the channel-specific rules.
+    """
+
+    if channel == "html":
+        # Only quoted src= and href= attributes
+        pattern = r"""
+            \b(?:src|href)
+            \s*=\s*
+            (?:
+                "([^"]*)"
+                |
+                '([^']*)'
+            )
+        """
+
+        urls = []
+
+        for match in re.finditer(
+            pattern,
+            output,
+            flags=re.IGNORECASE | re.VERBOSE,
+        ):
+            urls.append(match.group(1) if match.group(1) is not None else match.group(2))
+
+        return urls
+
+    if channel == "markdown":
+        # Target inside ](...)
+        pattern = r"\]\(([^)]*)\)"
+
+        return [
+            match.group(1).strip()
+            for match in re.finditer(pattern, output)
+        ]
+
+    if channel == "url":
+        return [output.strip()]
+
+    return []
+
+
+def url_has_dangerous_scheme(url: str) -> bool:
+    """
+    A URL is dangerous if its scheme is not http/https.
+    Protocol-relative URLs are treated as https.
+    Relative URLs are allowed.
+    """
+
+    value = url.strip()
+
+    if value.startswith("//"):
+        # Protocol-relative URL is treated as https
+        return False
+
+    parsed = urlsplit(value)
+
+    # No scheme means relative reference
+    if not parsed.scheme:
+        return False
+
+    return parsed.scheme.lower() not in {"http", "https"}
+
+
+def url_is_external_exfil(url: str) -> bool:
+    """
+    Absolute URLs must have an exact allowed hostname.
+    Relative references are allowed.
+    """
+
+    value = url.strip()
+
+    # Protocol-relative URL is absolute
+    if value.startswith("//"):
+        parsed = urlsplit("https:" + value)
+        return parsed.hostname not in ALLOWED_EXTERNAL_HOSTS
+
+    parsed = urlsplit(value)
+
+    # Relative URL
+    if not parsed.scheme:
+        return False
+
+    # Only HTTP/HTTPS reaches this point.
+    hostname = parsed.hostname
+
+    if hostname is None:
+        return True
+
+    return hostname not in ALLOWED_EXTERNAL_HOSTS
+
+
+def channel_violation(channel: str, output: str):
+    """
+    Apply channel rules in the required order.
+    Returns the first violation or None.
+    """
+
+    # --------------------------------------------------------
+    # HTML
+    # --------------------------------------------------------
+    if channel == "html":
+
+        # SCRIPT_TAG first
+        if re.search(
+            r"<\s*(script|iframe|object|embed)\b",
+            output,
+            flags=re.IGNORECASE,
+        ):
+            return "SCRIPT_TAG"
+
+        # EVENT_HANDLER second
+        if re.search(
+            r"\bon[a-zA-Z0-9_-]+\s*=",
+            output,
+            flags=re.IGNORECASE,
+        ):
+            return "EVENT_HANDLER"
+
+        # DANGEROUS_SCHEME third
+        if contains_dangerous_scheme(output):
+            return "DANGEROUS_SCHEME"
+
+        urls = extract_urls(channel, output)
+
+        for url in urls:
+            if url_has_dangerous_scheme(url):
+                return "DANGEROUS_SCHEME"
+
+        # EXTERNAL_EXFIL fourth
+        for url in urls:
+            if url_is_external_exfil(url):
+                return "EXTERNAL_EXFIL"
+
+        return None
+
+    # --------------------------------------------------------
+    # MARKDOWN
+    # --------------------------------------------------------
+    if channel == "markdown":
+
+        # DANGEROUS_SCHEME first
+        if contains_dangerous_scheme(output):
+            return "DANGEROUS_SCHEME"
+
+        urls = extract_urls(channel, output)
+
+        for url in urls:
+            if url_has_dangerous_scheme(url):
+                return "DANGEROUS_SCHEME"
+
+        # EXTERNAL_EXFIL second
+        for url in urls:
+            if url_is_external_exfil(url):
+                return "EXTERNAL_EXFIL"
+
+        return None
+
+    # --------------------------------------------------------
+    # URL
+    # --------------------------------------------------------
+    if channel == "url":
+
+        # DANGEROUS_SCHEME first
+        if contains_dangerous_scheme(output):
+            return "DANGEROUS_SCHEME"
+
+        urls = extract_urls(channel, output)
+
+        for url in urls:
+            if url_has_dangerous_scheme(url):
+                return "DANGEROUS_SCHEME"
+
+        # EXTERNAL_EXFIL second
+        for url in urls:
+            if url_is_external_exfil(url):
+                return "EXTERNAL_EXFIL"
+
+        return None
+
+    # --------------------------------------------------------
+    # SQL
+    # --------------------------------------------------------
+    if channel == "sql":
+
+        if re.search(
+            r"""['";]|--|/\*|\bunion\b|\bor\s+1\s*=\s*1\b""",
+            output,
+            flags=re.IGNORECASE,
+        ):
+            return "SQL_METACHAR"
+
+        return None
+
+    # --------------------------------------------------------
+    # SHELL
+    # --------------------------------------------------------
+    if channel == "shell":
+
+        if re.search(
+            r"""[;&|`<>]|\$\(|\$\{""",
+            output,
+        ):
+            return "SHELL_METACHAR"
+
+        return None
+
+    return None
+
+
+@app.post("/sanitize-output")
+async def sanitize_output(request: Request):
+
+    # ========================================================
+    # 1. INVALID_SCHEMA
+    # ========================================================
+
+    try:
+        body = await request.json()
+    except Exception:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA",
+        }
+
+    if not isinstance(body, dict):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA",
+        }
+
+    channel = body.get("channel")
+    output = body.get("output")
+
+    if channel not in VALID_CHANNELS:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA",
+        }
+
+    if not isinstance(output, str):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA",
+        }
+
+    if len(output) > 20000:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA",
+        }
+
+    # ========================================================
+    # 2. ENCODED_PAYLOAD
+    # ========================================================
+
+    decoded = decode_once(output)
+
+    if decoded != output:
+        decoded_violation = channel_violation(channel, decoded)
+
+        if decoded_violation is not None:
+            return {
+                "safe": False,
+                "reason": "ENCODED_PAYLOAD",
+            }
+
+    # ========================================================
+    # 3. Original output channel rules
+    # ========================================================
+
+    violation = channel_violation(channel, output)
+
+    if violation is not None:
+        return {
+            "safe": False,
+            "reason": violation,
+        }
+
+    # ========================================================
+    # SAFE
+    # ========================================================
+
+    return {
+        "safe": True,
+        "reason": "SAFE",
     }
