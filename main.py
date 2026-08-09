@@ -806,25 +806,144 @@ def url_is_external_exfil(url: str) -> bool:
     return hostname not in ALLOWED_EXTERNAL_HOSTS
 
 
+# def channel_violation(channel: str, output: str):
+
+#     # ========================================================
+#     # HTML
+#     # ========================================================
+
+#     if channel == "html":
+
+#         # 1. SCRIPT_TAG
+#         if re.search(
+#             r"<\s*(?:script|iframe|object|embed)\b",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "SCRIPT_TAG"
+
+#         # 2. EVENT_HANDLER
+#         if re.search(
+#             r"\bon[a-zA-Z0-9_-]+\s*=",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "EVENT_HANDLER"
+
+#         # 3. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("html", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 4. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # MARKDOWN
+#     # ========================================================
+
+#     if channel == "markdown":
+
+#         # 1. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("markdown", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 2. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # URL
+#     # ========================================================
+
+#     if channel == "url":
+
+#         # 1. DANGEROUS_SCHEME
+#         if contains_dangerous_scheme(output):
+#             return "DANGEROUS_SCHEME"
+
+#         urls = extract_urls("url", output)
+
+#         for url in urls:
+#             if url_has_dangerous_scheme(url):
+#                 return "DANGEROUS_SCHEME"
+
+#         # 2. EXTERNAL_EXFIL
+#         for url in urls:
+#             if url_is_external_exfil(url):
+#                 return "EXTERNAL_EXFIL"
+
+#         return None
+
+#     # ========================================================
+#     # SQL
+#     # ========================================================
+
+#     if channel == "sql":
+
+#         if re.search(
+#             r"""['";]|--|/\*|\bunion\b|\bor\s+1\s*=\s*1\b""",
+#             output,
+#             flags=re.IGNORECASE,
+#         ):
+#             return "SQL_METACHAR"
+
+#         return None
+
+#     # ========================================================
+#     # SHELL
+#     # ========================================================
+
+#     if channel == "shell":
+
+#         if re.search(
+#             r"""[;&|`<>]|\$\(|\$\{""",
+#             output,
+#         ):
+#             return "SHELL_METACHAR"
+
+#         return None
+
+#     return None
+
 def channel_violation(channel: str, output: str):
 
     # ========================================================
     # HTML
     # ========================================================
-
     if channel == "html":
 
         # 1. SCRIPT_TAG
         if re.search(
-            r"<\s*(?:script|iframe|object|embed)\b",
+            r"<\s*(script|iframe|object|embed)\b",
             output,
             flags=re.IGNORECASE,
         ):
             return "SCRIPT_TAG"
 
         # 2. EVENT_HANDLER
+        # HTML event-handler attributes such as:
+        # onclick=, onerror=, onload=, onmouseover=, etc.
         if re.search(
-            r"\bon[a-zA-Z0-9_-]+\s*=",
+            r"\bon[a-z][a-z0-9_-]*\s*=",
             output,
             flags=re.IGNORECASE,
         ):
@@ -850,7 +969,6 @@ def channel_violation(channel: str, output: str):
     # ========================================================
     # MARKDOWN
     # ========================================================
-
     if channel == "markdown":
 
         # 1. DANGEROUS_SCHEME
@@ -873,7 +991,6 @@ def channel_violation(channel: str, output: str):
     # ========================================================
     # URL
     # ========================================================
-
     if channel == "url":
 
         # 1. DANGEROUS_SCHEME
@@ -896,7 +1013,6 @@ def channel_violation(channel: str, output: str):
     # ========================================================
     # SQL
     # ========================================================
-
     if channel == "sql":
 
         if re.search(
@@ -911,7 +1027,6 @@ def channel_violation(channel: str, output: str):
     # ========================================================
     # SHELL
     # ========================================================
-
     if channel == "shell":
 
         if re.search(
@@ -923,7 +1038,6 @@ def channel_violation(channel: str, output: str):
         return None
 
     return None
-
 
 @app.post("/sanitize-output")
 async def sanitize_output(request: Request):
