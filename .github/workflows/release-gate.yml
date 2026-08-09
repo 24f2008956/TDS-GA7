@@ -30,65 +30,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
       - name: Start API
-        run: |
-          nohup python -m uvicorn main:app --host 127.0.0.1 --port 8000 > server.log 2>&1 &
-          sleep 5
+        run: python -m uvicorn main:app --host 127.0.0.1 --port 8000 &
+
+      - name: Wait for API
+        run: sleep 5
 
       - name: Test release gate
-        run: |
-          python - <<'PY'
-          import json
-          import urllib.request
-
-          payload = {
-              "target": "preview",
-              "event": "push",
-              "ref": "refs/heads/main",
-              "workflow": {
-                  "trigger": "push",
-                  "permissions": {
-                      "contents": "read",
-                      "packages": "write",
-                      "id-token": "none"
-                  },
-                  "testsPassed": True,
-                  "matrixComplete": True,
-                  "failFast": False,
-                  "actions": [
-                      {
-                          "owner": "actions",
-                          "name": "checkout",
-                          "ref": "v4"
-                      }
-                  ]
-              },
-              "image": {
-                  "multiStage": True,
-                  "runsAsRoot": False,
-                  "secretMode": "none",
-                  "criticalVulnerabilities": 0,
-                  "digestPinned": True
-              }
-          }
-
-          request = urllib.request.Request(
-              "http://127.0.0.1:8000/release-gate",
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-              method="POST"
-          )
-
-          with urllib.request.urlopen(request) as response:
-              result = json.load(response)
-
-          print(json.dumps(result, indent=2))
-
-          assert result["decision"] == "promote"
-          assert result["violations"] == []
-          PY
+        run: >
+          python -c "import json,urllib.request; p={'target':'preview','event':'push','ref':'refs/heads/main','workflow':{'trigger':'push','permissions':{'contents':'read','packages':'write','id-token':'none'},'testsPassed':True,'matrixComplete':True,'failFast':False,'actions':[{'owner':'actions','name':'checkout','ref':'v4'}]},'image':{'multiStage':True,'runsAsRoot':False,'secretMode':'none','criticalVulnerabilities':0,'digestPinned':True}}; r=urllib.request.Request('http://127.0.0.1:8000/release-gate',data=json.dumps(p).encode(),headers={'Content-Type':'application/json'},method='POST'); x=json.load(urllib.request.urlopen(r)); print(x); assert x['decision']=='promote' and x['violations']==[]"
