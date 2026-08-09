@@ -601,22 +601,31 @@ def terraform_plan(req: TerraformPlanRequest):
         "reason": "APPROVE"
     }
 
-
 # ============================================================
 # Q4 - LLM Output Handling Gate (OWASP LLM05)
 # ============================================================
+
+import re
+from urllib.parse import unquote, urlsplit
+from fastapi import Request
 
 ALLOWED_EXTERNAL_HOSTS = {
     "cdn-wko562a.example",
     "app-koyam7o.example",
 }
 
-VALID_CHANNELS = {"html", "markdown", "url", "sql", "shell"}
+VALID_CHANNELS = {
+    "html",
+    "markdown",
+    "url",
+    "sql",
+    "shell",
+}
 
 
 def decode_once(value: str) -> str:
     """
-    Decode exactly once in this order:
+    Decode exactly once:
     1. percent escapes
     2. specified HTML entities
     3. \\uXXXX escapes
@@ -625,17 +634,18 @@ def decode_once(value: str) -> str:
     # 1. Percent escapes
     decoded = unquote(value)
 
-    # 2. HTML numeric entities and the five specified named entities
-    def html_entity_replace(match):
+    # 2. HTML entities
+    def replace_entity(match):
         entity = match.group(0)
+        lower = entity.lower()
 
-        if entity.startswith("&#x") or entity.startswith("&#X"):
+        if lower.startswith("&#x"):
             try:
                 return chr(int(entity[3:-1], 16))
             except ValueError:
                 return entity
 
-        if entity.startswith("&#"):
+        if lower.startswith("&#"):
             try:
                 return chr(int(entity[2:-1], 10))
             except ValueError:
@@ -649,25 +659,20 @@ def decode_once(value: str) -> str:
             "&amp;": "&",
         }
 
-        return named.get(entity, entity)
+        return named.get(lower, entity)
 
     decoded = re.sub(
-        r"&#x[0-9a-fA-F]+;|&#[0-9]+;|&lt;|&gt;|&quot;|&apos;|&amp;",
-        html_entity_replace,
+        r"&#x[0-9a-fA-F]+;|&#[0-9]+;|"
+        r"&lt;|&gt;|&quot;|&apos;|&amp;",
+        replace_entity,
         decoded,
         flags=re.IGNORECASE,
     )
 
     # 3. Literal \uXXXX escapes
-    def unicode_replace(match):
-        try:
-            return chr(int(match.group(1), 16))
-        except ValueError:
-            return match.group(0)
-
     decoded = re.sub(
         r"\\u([0-9a-fA-F]{4})",
-        unicode_replace,
+        lambda m: chr(int(m.group(1), 16)),
         decoded,
     )
 
@@ -675,9 +680,6 @@ def decode_once(value: str) -> str:
 
 
 def contains_dangerous_scheme(text: str) -> bool:
-    """
-    Detect dangerous schemes appearing directly in text.
-    """
     return bool(
         re.search(
             r"(?:javascript|data|vbscript)\s*:",
@@ -689,40 +691,56 @@ def contains_dangerous_scheme(text: str) -> bool:
 
 def extract_urls(channel: str, output: str):
     """
-    Extract URLs according to the channel-specific rules.
+    Extract URLs exactly according to the question.
     """
 
     if channel == "html":
-        # Only quoted src= and href= attributes
-        pattern = r"""
-            \b(?:src|href)
-            \s*=\s*
-            (?:
-                "([^"]*)"
-                |
-                '([^']*)'
-            )
-        """
+        # Quoted src/href only
+        pattern = (
+            r"""\b(?:src|href)\s*=\s*"""
+            r"""(?:"([^"]*)"|'([^']*)')"""
+        )
 
-        urls = []
+        result = []
 
         for match in re.finditer(
             pattern,
             output,
-            flags=re.IGNORECASE | re.VERBOSE,
+            flags=re.IGNORECASE,
         ):
-            urls.append(match.group(1) if match.group(1) is not None else match.group(2))
+            value = (
+                match.group(1)
+                if match.group(1) is not None
+                else match.group(2)
+            )
+            result.append(value)
 
-        return urls
+        return result
 
     if channel == "markdown":
         # Target inside ](...)
-        pattern = r"\]\(([^)]*)\)"
+        result = []
 
-        return [
-            match.group(1).strip()
-            for match in re.finditer(pattern, output)
-        ]
+        for match in re.finditer(
+            r"\]\(([^)]*)\)",
+            output,
+        ):
+            value = match.group(1).strip()
+
+            # Markdown permits angle brackets around a destination.
+            if len(value) >= 2 and value[0] == "<" and value[-1] == ">":
+                value = value[1:-1].strip()
+
+            # If a markdown title follows the destination, keep only
+            # the destination itself.
+            if value:
+                if value.startswith(("http://", "https://", "//")):
+                    parts = value.split(None, 1)
+                    value = parts[0]
+
+            result.append(value)
+
+        return result
 
     if channel == "url":
         return [output.strip()]
@@ -730,48 +748,56 @@ def extract_urls(channel: str, output: str):
     return []
 
 
-def url_has_dangerous_scheme(url: str) -> bool:
+def parse_url(value: str):
     """
-    A URL is dangerous if its scheme is not http/https.
-    Protocol-relative URLs are treated as https.
-    Relative URLs are allowed.
+    Parse HTTP/HTTPS/protocol-relative URLs safely.
     """
 
-    value = url.strip()
+    value = value.strip()
 
     if value.startswith("//"):
-        # Protocol-relative URL is treated as https
+        return urlsplit("https:" + value)
+
+    return urlsplit(value)
+
+
+def url_has_dangerous_scheme(url: str) -> bool:
+    value = url.strip()
+
+    # Protocol-relative references are treated as HTTPS.
+    if value.startswith("//"):
         return False
 
     parsed = urlsplit(value)
 
-    # No scheme means relative reference
+    # Relative references have no scheme and are safe at this stage.
     if not parsed.scheme:
         return False
 
-    return parsed.scheme.lower() not in {"http", "https"}
+    return parsed.scheme.lower() not in {
+        "http",
+        "https",
+    }
 
 
 def url_is_external_exfil(url: str) -> bool:
-    """
-    Absolute URLs must have an exact allowed hostname.
-    Relative references are allowed.
-    """
-
     value = url.strip()
 
-    # Protocol-relative URL is absolute
+    # Relative references are explicitly allowed.
+    if value.startswith("/") and not value.startswith("//"):
+        return False
+
     if value.startswith("//"):
         parsed = urlsplit("https:" + value)
-        return parsed.hostname not in ALLOWED_EXTERNAL_HOSTS
+    else:
+        parsed = urlsplit(value)
 
-    parsed = urlsplit(value)
-
-    # Relative URL
+    # No scheme = relative URL.
     if not parsed.scheme:
         return False
 
-    # Only HTTP/HTTPS reaches this point.
+    # At this point the caller has already checked dangerous schemes.
+    # Compare hostname only.
     hostname = parsed.hostname
 
     if hostname is None:
@@ -781,25 +807,22 @@ def url_is_external_exfil(url: str) -> bool:
 
 
 def channel_violation(channel: str, output: str):
-    """
-    Apply channel rules in the required order.
-    Returns the first violation or None.
-    """
 
-    # --------------------------------------------------------
+    # ========================================================
     # HTML
-    # --------------------------------------------------------
+    # ========================================================
+
     if channel == "html":
 
-        # SCRIPT_TAG first
+        # 1. SCRIPT_TAG
         if re.search(
-            r"<\s*(script|iframe|object|embed)\b",
+            r"<\s*(?:script|iframe|object|embed)\b",
             output,
             flags=re.IGNORECASE,
         ):
             return "SCRIPT_TAG"
 
-        # EVENT_HANDLER second
+        # 2. EVENT_HANDLER
         if re.search(
             r"\bon[a-zA-Z0-9_-]+\s*=",
             output,
@@ -807,70 +830,73 @@ def channel_violation(channel: str, output: str):
         ):
             return "EVENT_HANDLER"
 
-        # DANGEROUS_SCHEME third
+        # 3. DANGEROUS_SCHEME
         if contains_dangerous_scheme(output):
             return "DANGEROUS_SCHEME"
 
-        urls = extract_urls(channel, output)
+        urls = extract_urls("html", output)
 
         for url in urls:
             if url_has_dangerous_scheme(url):
                 return "DANGEROUS_SCHEME"
 
-        # EXTERNAL_EXFIL fourth
+        # 4. EXTERNAL_EXFIL
         for url in urls:
             if url_is_external_exfil(url):
                 return "EXTERNAL_EXFIL"
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # MARKDOWN
-    # --------------------------------------------------------
+    # ========================================================
+
     if channel == "markdown":
 
-        # DANGEROUS_SCHEME first
+        # 1. DANGEROUS_SCHEME
         if contains_dangerous_scheme(output):
             return "DANGEROUS_SCHEME"
 
-        urls = extract_urls(channel, output)
+        urls = extract_urls("markdown", output)
 
         for url in urls:
             if url_has_dangerous_scheme(url):
                 return "DANGEROUS_SCHEME"
 
-        # EXTERNAL_EXFIL second
+        # 2. EXTERNAL_EXFIL
         for url in urls:
             if url_is_external_exfil(url):
                 return "EXTERNAL_EXFIL"
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # URL
-    # --------------------------------------------------------
+    # ========================================================
+
     if channel == "url":
 
-        # DANGEROUS_SCHEME first
+        # 1. DANGEROUS_SCHEME
         if contains_dangerous_scheme(output):
             return "DANGEROUS_SCHEME"
 
-        urls = extract_urls(channel, output)
+        urls = extract_urls("url", output)
 
         for url in urls:
             if url_has_dangerous_scheme(url):
                 return "DANGEROUS_SCHEME"
 
-        # EXTERNAL_EXFIL second
+        # 2. EXTERNAL_EXFIL
         for url in urls:
             if url_is_external_exfil(url):
                 return "EXTERNAL_EXFIL"
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # SQL
-    # --------------------------------------------------------
+    # ========================================================
+
     if channel == "sql":
 
         if re.search(
@@ -882,9 +908,10 @@ def channel_violation(channel: str, output: str):
 
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # SHELL
-    # --------------------------------------------------------
+    # ========================================================
+
     if channel == "shell":
 
         if re.search(
@@ -947,7 +974,11 @@ async def sanitize_output(request: Request):
     decoded = decode_once(output)
 
     if decoded != output:
-        decoded_violation = channel_violation(channel, decoded)
+
+        decoded_violation = channel_violation(
+            channel,
+            decoded,
+        )
 
         if decoded_violation is not None:
             return {
@@ -956,10 +987,13 @@ async def sanitize_output(request: Request):
             }
 
     # ========================================================
-    # 3. Original output channel rules
+    # 3. Original output rules
     # ========================================================
 
-    violation = channel_violation(channel, output)
+    violation = channel_violation(
+        channel,
+        output,
+    )
 
     if violation is not None:
         return {
